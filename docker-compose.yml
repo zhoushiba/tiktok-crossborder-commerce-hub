@@ -1,0 +1,103 @@
+# ===========================================================================
+# TikTok 跨境直播电商中台 · 本地容器编排
+# ---------------------------------------------------------------------------
+# 说明（重要）：
+#   本文件按标准写法编写，但作者本机没有安装 Docker，**未实际执行验证**，
+#   因此 README「已知限制」与 docs/roadmap.md 中如实标注为「未跑通」。
+#
+# 预期用法：
+#   docker compose up --build
+#   API      http://127.0.0.1:3000/api     （Swagger: /api/docs）
+#   Mock     http://127.0.0.1:8090/api/v2/health
+#   Web      http://127.0.0.1:4173
+#
+# 服务划分：
+#   api  —— 后端 API（Express），SQLite 数据落在命名卷 sqlite-data 上
+#   mock —— 内置 TikTok Shop 网关，独立进程/端口，供 api 拉单
+#   web  —— Nginx 托管前端构建产物，并把 /api 反向代理到 api
+# ===========================================================================
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: tiktok-hub-api:1.0.0
+    container_name: tiktok-hub-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_PORT: 3000
+      # 容器内访问 Mock 服务用服务名，不能用 127.0.0.1
+      TIKTOK_API_BASE: http://mock:8090
+      TIKTOK_APP_KEY: tt-app-key-demo
+      TIKTOK_APP_SECRET: tt-app-secret-demo
+      DB_FILE: data/tiktok-hub.db
+      DB_SCHEMA_FILE: /app/db/schema.sql
+      DB_SEED_FILE: /app/db/seed.sql
+      BASE_CURRENCY: CNY
+      JWT_SECRET: ${JWT_SECRET:-please-change-this-to-a-long-random-string-32bytes}
+      JWT_EXPIRES_IN: 12h
+      LOG_LEVEL: info
+    ports:
+      - "3000:3000"
+    volumes:
+      - sqlite-data:/app/backend/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/system/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - hub
+
+  mock:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: tiktok-hub-api:1.0.0
+    container_name: tiktok-hub-mock
+    restart: unless-stopped
+    # 同一个镜像，换启动入口：只跑 Mock 网关
+    command: ["node", "dist/mock/standalone.js"]
+    environment:
+      NODE_ENV: production
+      MOCK_PORT: 8090
+      TIKTOK_APP_KEY: tt-app-key-demo
+      TIKTOK_APP_SECRET: tt-app-secret-demo
+      LOG_LEVEL: info
+    ports:
+      - "8090:8090"
+    networks:
+      - hub
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # 构建期把 API 地址写成同源 /api，由 Nginx 反代到 api 服务
+        VITE_API_BASE_URL: /api
+    image: tiktok-hub-web:1.0.0
+    container_name: tiktok-hub-web
+    restart: unless-stopped
+    ports:
+      - "4173:80"
+    depends_on:
+      - api
+    networks:
+      - hub
+
+volumes:
+  sqlite-data:
+    name: tiktok-hub-sqlite-data
+
+networks:
+  hub:
+    name: tiktok-hub-network
+    driver: bridge
